@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>FCPC Analyzer</title>
+    <link rel="manifest" href="manifest.json">
+    <style>
+        :root { --nikon-gold: #ffd700; --fc-cyan: #00f2ff; --bg-black: #050505; --card-bg: #121212; --dark-box: #1a1a1a; }
+        body { background-color: var(--bg-black); color: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 20px 20px 140px; -webkit-font-smoothing: antialiased; }
+        header { text-align: center; margin-bottom: 40px; padding-top: 15px; }
+        h1 { color: var(--nikon-gold); margin: 0; font-size: 1.9rem; letter-spacing: 3px; text-transform: uppercase; font-weight: 900; }
+        .subtitle { font-size: 0.8rem; color: #666; margin-top: 8px; letter-spacing: 1px; font-weight: 400; }
+        #gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 30px; max-width: 1500px; margin: 0 auto; }
+        .card { background: var(--card-bg); border-radius: 16px; overflow: hidden; border: 1px solid #222; box-shadow: 0 15px 35px rgba(0,0,0,0.6); margin-bottom: 10px; }
+        .img-box { padding: 5px 5px 0 5px; background: #000; }
+        .img-box img { width: 100%; height: auto; display: block; background: #000; border-radius: 12px; }
+        .info-box { padding: 20px 22px; border-top: 4px solid var(--fc-cyan); border-image: linear-gradient(to right, #0099ff, var(--fc-cyan)) 1; }
+        .label { font-size: 9px; color: #555; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 6px; }
+        .pc-name { font-size: 23px; font-weight: 800; color: var(--fc-cyan); margin-bottom: 18px; letter-spacing: -0.5px; }
+        .exif-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+        @media (min-width: 400px) { .exif-grid { grid-template-columns: repeat(4, 1fr); } }
+        .exif-item { text-align: center; background: var(--dark-box); padding: 12px; border-radius: 8px; border: 1px solid #222; }
+        .exif-val { font-size: 13px; font-weight: 700; color: #fff; margin-top: 5px; line-height: 1.2; }
+        .controls { position: fixed; bottom: 0; left: 0; width: 100%; background: rgba(3,3,3,0.92); padding: 22px 0; text-align: center; backdrop-filter: blur(12px); border-top: 1px solid #222; z-index: 1000; }
+        .btn-upload { background-color: var(--nikon-gold); color: #000; padding: 13px 40px; border-radius: 30px; font-size: 1.0rem; font-weight: 800; cursor: pointer; display: inline-block; box-shadow: 0 4px 15px rgba(0,0,0,0.4); border: none; letter-spacing: 1.5px; text-transform: uppercase; transition: all 0.15s ease-in-out; }
+        .btn-clear { background-color: transparent; color: #fff; padding: 13px 28px; border-radius: 30px; font-size: 1.0rem; font-weight: 800; cursor: pointer; display: inline-block; border: 1px solid #444; letter-spacing: 1.5px; text-transform: uppercase; transition: all 0.15s ease-in-out; margin-right: 12px; }
+        .btn-clear:disabled { opacity: 0.25; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+    <header><h1>FCPC Analyzer</h1><div class="subtitle">Flexible Color Picture Control Analyzer</div></header>
+    <div id="gallery"></div>
+    <div class="controls">
+        <button class="btn-clear" id="clearBtn" onclick="clearGallery()" disabled>CLEAR</button>
+        <button class="btn-upload" onclick="document.getElementById('files').click()">SELECT PHOTOS</button>
+        <input type="file" id="files" accept="image/jpeg" multiple style="display:none;">
+    </div>
+    <script>
+        document.getElementById('files').addEventListener('change', async (e) => {
+            const files = Array.from(e.target.files);
+            const gallery = document.getElementById('gallery');
+            for (const file of files) {
+                try {
+                    const buf = await file.arrayBuffer();
+                    const u8 = new Uint8Array(buf);
+                    const view = new DataView(buf);
+                    let res = { pc: "Standard", iso: "-", ss: "-", aperture: "-", wb: "-" };
+
+                    // 1. Picture Control Name Extraction
+                    for (let i = 0; i < Math.min(u8.length - 50, 800000); i++) {
+                        if (u8[i] === 0x30 && u8[i+1] === 0x33 && u8[i+2] === 0x31 && u8[i+3] === 0x30) {
+                            let name = "";
+                            for (let j = 4; j < 54; j++) {
+                                let c = u8[i+j];
+                                if (c === 0 || (c < 32 && c !== 0x20)) break;
+                                name += String.fromCharCode(c);
+                            }
+                            let clean = name.split('0310').join('').trim();
+                            if (clean.length > 1) { res.pc = clean; break; }
+                        }
+                    }
+
+                    // 2. EXIF Structural Analysis (Robust Tiff Pointer)
+                    let tiffPtr = -1;
+                    for (let i = 0; i < 2048; i++) {
+                        if (u8[i] === 0x49 && u8[i+1] === 0x49 && u8[i+2] === 0x2A) { tiffPtr = i; break; }
+                        if (u8[i] === 0x4D && u8[i+1] === 0x4D && u8[i+3] === 0x2A) { tiffPtr = i; break; }
+                    }
+
+                    if (tiffPtr !== -1) {
+                        const le = (u8[tiffPtr] === 0x49);
+                        const firstIFD = tiffPtr + view.getUint32(tiffPtr + 4, le);
+
+                        const getRational = (off) => {
+                            const p = tiffPtr + off;
+                            if (p + 8 > u8.length) return 0;
+                            const n = view.getUint32(p, le);
+                            const d = view.getUint32(p + 4, le);
+                            return d === 0 ? 0 : n / d;
+                        };
+
+                        const parseMakerNote = (mnStart) => {
+                            // Nikon MakerNote: "Nikon\0" + version(2B) + byte_order(2B) + 0x002A(2B) + ifd_offset(4B)
+                            // ヘッダー確認: "Nikon\0" = 6バイト
+                            if (!(u8[mnStart] === 0x4E && u8[mnStart+1] === 0x69 &&
+                                  u8[mnStart+2] === 0x6B && u8[mnStart+3] === 0x6F &&
+                                  u8[mnStart+4] === 0x6E && u8[mnStart+5] === 0x00)) {
+                                return;
+                            }
+
+                            // Nikon MakerNote構造:
+                            // "Nikon\0"(6) + version(2) + padding(2) + TIFF開始
+                            // → mnStart+10 からTIFFヘッダー (II/MM + 0x002A + IFDオフセット)
+                            const mnBase = mnStart + 10;
+                            const mnLE = (u8[mnBase] === 0x49); // "II" = little endian
+                            const mnView = new DataView(buf, mnBase);
+
+                            // MN内IFDオフセット(MNTIFFヘッダー先頭からの相対値)
+                            const mnIFDOffset = mnView.getUint32(4, mnLE);
+                            const mnIFD = mnBase + mnIFDOffset;
+
+                            if (mnIFD + 2 > u8.length) return;
+                            const mnNum = new DataView(buf).getUint16(mnIFD, mnLE);
+
+                            let baseWB = -1;
+                            let kelvin = -1;
+                            let autoSubModeOffset = -1;
+                            let wbStringRaw = null;
+
+                            for (let j = 0; j < mnNum; j++) {
+                                const mE = mnIFD + 2 + (j * 12);
+                                if (mE + 12 > u8.length) break;
+                                const mTag = new DataView(buf).getUint16(mE, mnLE);
+                                const mType = new DataView(buf).getUint16(mE + 2, mnLE);
+                                const mCount = new DataView(buf).getUint32(mE + 4, mnLE);
+                                const mValOff = mE + 8;
+
+                                if (mTag === 0x0005) {
+                                    const mType5  = new DataView(buf).getUint16(mE + 2, mnLE);
+                                    const mCount5 = new DataView(buf).getUint32(mE + 4, mnLE);
+                                    if (mType5 === 2) {
+                                        // Nikon Zシリーズ: ASCII文字列 ("AUTO0","AUTO1","AUTO2","INCANDESCNT"等)
+                                        const off5 = new DataView(buf).getUint32(mValOff, mnLE);
+                                        const absOff = mCount5 <= 4 ? mValOff : (mnBase + off5);
+                                        let str = "";
+                                        for (let k = 0; k < Math.min(mCount5, 32); k++) {
+                                            const c = u8[absOff + k];
+                                            if (c === 0) break;
+                                            str += String.fromCharCode(c);
+                                        }
+                                        wbStringRaw = str.trim();
+                                    } else if (mType5 === 3 && mCount5 === 1) {
+                                        baseWB = new DataView(buf).getUint16(mValOff, mnLE);
+                                    } else if (mType5 === 3 && mCount5 > 1) {
+                                        const off5 = new DataView(buf).getUint32(mValOff, mnLE);
+                                        baseWB = new DataView(buf).getUint16(mnBase + off5, mnLE);
+                                    } else {
+                                        baseWB = new DataView(buf).getUint16(mValOff, mnLE);
+                                    }
+                                }
+                                if (mTag === 0x0019) {
+                                    // Color Temperature: SHORT 1値
+                                    kelvin = new DataView(buf).getUint16(mValOff, mnLE);
+                                }
+                                if (mTag === 0x03BC) {
+                                    // Auto WB Fine Tune: オフセットはMNTIFF基準
+                                    autoSubModeOffset = new DataView(buf).getUint32(mValOff, mnLE);
+                                }
+                            }
+
+                            // Nikon ZシリーズはASCII文字列でWBを格納
+                            // 旧機種はSHORT数値で格納
+                            const wbStringMap = {
+                                "AUTO0": "Auto0",
+                                "AUTO1": "Auto1",
+                                "AUTO2": "Auto2",
+                                "INCANDESCNT": "Incandescent",
+                                "FLUORESCNT":  "Fluorescent",
+                                "SUNNY":       "Direct Sunlight",
+                                "FLASH":       "Flash",
+                                "CLOUDY":      "Cloudy",
+                                "SHADE":       "Shade",
+                                "COLORTEMP":   "Color Temp",
+                                "PRESET":      "Preset Manual",
+                                "NATLIGHT":    "Natural Light Auto",
+                            };
+                            const wbNumMap = {
+                                0: "Auto", 1: "Incandescent", 2: "Fluorescent",
+                                3: "Direct Sunlight", 4: "Flash", 5: "Cloudy",
+                                6: "Shade", 7: "Color Temp", 8: "Preset Manual",
+                                151: "Natural Light Auto",
+                            };
+
+                            if (wbStringRaw !== null) {
+                                // Nikon Zシリーズ：ASCII文字列マッチ
+                                if (wbStringRaw in wbStringMap) {
+                                    res.wb = wbStringMap[wbStringRaw];
+                                } else if (wbStringRaw.startsWith("AUTO")) {
+                                    // AUTO0/1/2以外の未知サブモード
+                                    res.wb = "Auto";
+                                } else if (wbStringRaw.startsWith("COLORTEMP") || wbStringRaw === "KELVIN") {
+                                    res.wb = (kelvin > 100) ? `${kelvin}K` : "Color Temp";
+                                } else {
+                                    res.wb = wbStringRaw; // そのまま表示（未知値のデバッグ用）
+                                }
+                            } else if (baseWB === 0) {
+                                // 旧機種Auto WBのサブモード判定
+                                if (autoSubModeOffset !== -1) {
+                                    const subModeAbsPos = mnBase + autoSubModeOffset;
+                                    if (subModeAbsPos < u8.length) {
+                                        const mode = u8[subModeAbsPos];
+                                        if (mode === 1) res.wb = "Auto1";
+                                        else if (mode === 2) res.wb = "Auto2";
+                                        else res.wb = "Auto0";
+                                    } else {
+                                        res.wb = "Auto";
+                                    }
+                                } else {
+                                    res.wb = "Auto";
+                                }
+                            } else if (baseWB === 7) {
+                                res.wb = (kelvin > 100) ? `${kelvin}K` : "Color Temp";
+                            } else if (baseWB !== -1) {
+                                res.wb = wbNumMap[baseWB] || `WB:${baseWB}`;
+                            }
+                        };
+
+                        const findTags = (offset, depth = 0) => {
+                            if (depth > 3 || offset + 2 > u8.length) return;
+                            const num = view.getUint16(offset, le);
+                            for (let i = 0; i < num; i++) {
+                                const entry = offset + 2 + (i * 12);
+                                if (entry + 12 > u8.length) break;
+                                const tag = view.getUint16(entry, le);
+                                const val = view.getUint32(entry + 8, le);
+
+                                if (tag === 0x8827) res.iso = view.getUint16(entry + 8, le);
+                                if (tag === 0x8769) findTags(tiffPtr + val, depth + 1);
+                                if (tag === 0x829A) {
+                                    const v = getRational(val);
+                                    res.ss = v >= 1 ? Math.round(v) + "s" : "1/" + Math.round(1/v);
+                                }
+                                if (tag === 0x829D) res.aperture = "f/" + getRational(val).toFixed(1);
+
+                                // MakerNote (Nikon) — 絶対位置を渡す
+                                if (tag === 0x927C) {
+                                    const mnAbsStart = tiffPtr + val;
+                                    parseMakerNote(mnAbsStart);
+                                }
+                            }
+                        };
+                        findTags(firstIFD);
+                    }
+
+                    const url = URL.createObjectURL(file);
+                    const card = document.createElement('div');
+                    card.className = 'card';
+                    card.innerHTML = `
+                        <div class="img-box"><img src="${url}"></div>
+                        <div class="info-box">
+                            <div class="label">Picture Control</div>
+                            <div class="pc-name">${res.pc}</div>
+                            <div class="exif-grid">
+                                <div class="exif-item"><div class="label">ISO</div><div class="exif-val">${res.iso}</div></div>
+                                <div class="exif-item"><div class="label">SS</div><div class="exif-val">${res.ss}</div></div>
+                                <div class="exif-item"><div class="label">Aperture</div><div class="exif-val">${res.aperture}</div></div>
+                                <div class="exif-item"><div class="label">WB</div><div class="exif-val">${res.wb}</div></div>
+                            </div>
+                        </div>`;
+                    gallery.prepend(card);
+                    document.getElementById('clearBtn').disabled = false;
+                } catch (err) { console.error("Parse Error:", err); }
+            }
+        });
+        function clearGallery() {
+            if (!confirm('すべての画像をクリアしますか？')) return;
+            document.getElementById('gallery').innerHTML = '';
+            document.getElementById('files').value = '';
+            document.getElementById('clearBtn').disabled = true;
+        }
+    </script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js')
+          .then(() => console.log('SW registered'))
+          .catch(err => console.log('SW error', err));
+      });
+    }
+  </script>
+</body>
+</html>
